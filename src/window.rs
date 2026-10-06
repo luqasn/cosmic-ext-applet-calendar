@@ -18,7 +18,7 @@ use cosmic::{
     surface, theme,
     widget::{
         Button, Grid, Id, autosize, button, container, divider, grid, icon, rectangle_tracker::*,
-        scrollable, space, text,
+        scrollable, space, text, toggler,
     },
 };
 use jiff::{
@@ -37,6 +37,7 @@ use crate::{config::TimeAppletConfig, fl, time::get_calendar_first};
 use cosmic::applet::token::subscription::{
     TokenRequest, TokenUpdate, activation_token_subscription,
 };
+use cosmic_config::CosmicConfigEntry;
 use icu::{
     datetime::{
         DateTimeFormatter, DateTimeFormatterPreferences, fieldsets,
@@ -45,6 +46,12 @@ use icu::{
     },
     locale::{Locale, preferences::extensions::unicode::keywords::HourCycle},
 };
+
+/// How often today's and tomorrow's events are re-fetched while the next meeting is shown in the panel.
+const TODAY_EVENTS_REFRESH: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Maximum number of characters of a meeting name shown in the panel.
+const NEXT_MEETING_MAX_CHARS: usize = 32;
 
 static AUTOSIZE_MAIN_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize-main"));
 
@@ -118,6 +125,8 @@ pub struct Window<M: AppletModeTrait = StandaloneCalendar> {
     month_events: Vec<crate::event::CalendarEvent>,
     month_event_dates: std::collections::HashSet<Date>,
     selected_date_events: Vec<crate::event::CalendarEvent>,
+    upcoming_events: Vec<crate::event::CalendarEvent>,
+    upcoming_events_fetched_at: Option<std::time::Instant>,
     _mode: std::marker::PhantomData<M>,
 }
 
@@ -139,6 +148,8 @@ pub enum Message {
     OpenUrl(String),
     FetchEvents(Date),
     EventsLoaded(Date, Result<Vec<crate::event::CalendarEvent>, String>),
+    ToggleNextMeeting(bool),
+    UpcomingEventsLoaded(Date, Result<Vec<crate::event::CalendarEvent>, String>),
 }
 
 impl<M: AppletModeTrait> Window<M> {
@@ -339,6 +350,11 @@ impl<M: AppletModeTrait> Window<M> {
             }
         };
 
+        let formatted_date = match self.next_meeting_label() {
+            Some(label) => format!("{formatted_date} · {label}"),
+            None => formatted_date,
+        };
+
         Element::from(
             row!(
                 self.core.applet.text(formatted_date),
@@ -352,16 +368,65 @@ impl<M: AppletModeTrait> Window<M> {
         )
     }
 
+    /// Panel label for the current or next meeting: `in 25m Standup` for later today,
+    /// `now Standup` while it is in progress, or `tomorrow 9:00 AM Standup`.
+    /// Only produced in clock mode with `show_next_meeting` enabled.
+    fn next_meeting_label(&self) -> Option<String> {
+        if M::IS_STANDALONE || !self.config.show_next_meeting {
+            return None;
+        }
+
+        let event = crate::event::current_or_next_event(&self.upcoming_events, &self.now)?;
+        let summary = event.summary.trim();
+        let name = if summary.is_empty() {
+            fl!("untitled-event")
+        } else if summary.chars().count() > NEXT_MEETING_MAX_CHARS {
+            let truncated: String = summary.chars().take(NEXT_MEETING_MAX_CHARS - 1).collect();
+            format!("{}…", truncated.trim_end())
+        } else {
+            summary.to_owned()
+        };
+
+        let start = event.start.with_time_zone(self.now.time_zone().clone());
+        if start.date() != self.now.date() && start > self.now {
+            let time = start.strftime(self.event_time_format()).to_string();
+            return Some(fl!("next-meeting-tomorrow", time = time, name = name));
+        }
+
+        let minutes = crate::event::minutes_until(&self.now, &event.start);
+        Some(match crate::event::format_countdown(minutes) {
+            Some(countdown) => fl!("next-meeting", countdown = countdown, name = name),
+            None => fl!("next-meeting-now", name = name),
+        })
+    }
+
+    fn fetch_upcoming_events_task(&mut self) -> app::Task<Message> {
+        self.upcoming_events_fetched_at = Some(std::time::Instant::now());
+        let backend = self.calendar_backend.clone();
+        let today = self.date_today;
+        let tomorrow = today.tomorrow().unwrap_or(today);
+
+        Task::future(async move {
+            let res = backend.fetch_events(today, tomorrow).await;
+            Message::UpcomingEventsLoaded(today, res.map_err(|err| err.to_string()))
+        })
+        .map(cosmic::Action::App)
+    }
+
+    fn event_time_format(&self) -> &'static str {
+        if self.config.military_time {
+            "%H:%M"
+        } else {
+            "%-I:%M %p"
+        }
+    }
+
     fn format_event_time(&self, event: &crate::event::CalendarEvent) -> String {
         if event.is_all_day {
             return fl!("all-day");
         }
 
-        let time_format = if self.config.military_time {
-            "%H:%M"
-        } else {
-            "%-I:%M %p"
-        };
+        let time_format = self.event_time_format();
 
         let start_str = event.start.strftime(time_format).to_string();
         let end_str = event.end.strftime(time_format).to_string();
@@ -553,6 +618,8 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
             month_events: Vec::new(),
             month_event_dates: std::collections::HashSet::new(),
             selected_date_events: Vec::new(),
+            upcoming_events: Vec::new(),
+            upcoming_events_fetched_at: None,
             _mode: std::marker::PhantomData,
         };
 
@@ -788,11 +855,25 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
                         .invalidate(old_date.year(), old_date.month());
                     self.event_cache
                         .invalidate(self.date_today.year(), self.date_today.month());
+                    self.upcoming_events.clear();
+                    self.upcoming_events_fetched_at = None;
 
                     // Zero Idle IPC: only fetch if popup is open
+                    // (the month reload also refreshes today's events via EventsLoaded).
                     if self.popup.is_some() {
                         return self.update(Message::FetchEvents(self.date_selected));
                     }
+                }
+
+                // The next meeting in the panel needs periodic fetches even while the popup
+                // is closed; this is opt-in and only happens with the setting enabled.
+                if self.config.show_next_meeting
+                    && !M::IS_STANDALONE
+                    && self
+                        .upcoming_events_fetched_at
+                        .is_none_or(|t| t.elapsed() >= TODAY_EVENTS_REFRESH)
+                {
+                    return self.fetch_upcoming_events_task();
                 }
                 Task::none()
             }
@@ -925,7 +1006,36 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
                         true
                     }
                 });
+                let enabled_next_meeting = c.show_next_meeting && !self.config.show_next_meeting;
                 self.config = c;
+                if enabled_next_meeting && !M::IS_STANDALONE {
+                    return self.fetch_upcoming_events_task();
+                }
+                Task::none()
+            }
+            Message::ToggleNextMeeting(enabled) => {
+                match cosmic_config::Config::new(Self::APP_ID, TimeAppletConfig::VERSION) {
+                    Ok(config) => {
+                        if let Err(err) = self.config.set_show_next_meeting(&config, enabled) {
+                            tracing::error!(?err, "Failed to save show_next_meeting");
+                        }
+                    }
+                    Err(err) => tracing::error!(?err, "Failed to open applet config"),
+                }
+                // Setting the field locally bypasses the change detection in ConfigChanged
+                // so fetch here as well.
+                if enabled && !M::IS_STANDALONE {
+                    return self.fetch_upcoming_events_task();
+                }
+                Task::none()
+            }
+            Message::UpcomingEventsLoaded(date, result) => {
+                if date == self.date_today {
+                    match result {
+                        Ok(events) => self.upcoming_events = events,
+                        Err(err) => tracing::warn!(?err, "Failed to load today's events"),
+                    }
+                }
                 Task::none()
             }
             Message::TimezoneUpdate(timezone) => {
@@ -942,6 +1052,14 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
             Message::EventsLoaded(date, result) => {
                 match result {
                     Ok(events) => {
+                        if self.date_today.year() == date.year()
+                            && self.date_today.month() == date.month()
+                        {
+                            // The fetched range is the whole 6-week calendar grid, which always
+                            // includes tomorrow, so it covers everything the panel needs.
+                            self.upcoming_events = events.clone();
+                            self.upcoming_events_fetched_at = Some(std::time::Instant::now());
+                        }
                         self.event_cache
                             .insert(date.year(), date.month(), events.clone());
                         if self.date_selected.year() == date.year()
@@ -1048,6 +1166,17 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
 
         let calendar = self.calendar_grid();
 
+        let next_meeting_toggle = (!M::IS_STANDALONE).then(|| {
+            padded_control(
+                row![
+                    text::body(fl!("show-next-meeting")),
+                    space::horizontal().width(Length::Fill),
+                    toggler(self.config.show_next_meeting).on_toggle(Message::ToggleNextMeeting),
+                ]
+                .align_y(Alignment::Center),
+            )
+        });
+
         let content_list = column![
             row![
                 column![date, day_of_week],
@@ -1060,9 +1189,12 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
             padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
             container(self.events_view()).padding([0, 16]),
             padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
+        ]
+        .push_maybe(next_meeting_toggle)
+        .push(
             menu_button(text::body(fl!("datetime-settings")))
                 .on_press(Message::OpenDateTimeSettings),
-        ]
+        )
         .padding([8, 0]);
 
         self.core

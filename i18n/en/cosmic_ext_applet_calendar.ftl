@@ -4,3 +4,7 @@ all-day = All day
 untitled-event = (Untitled event)
 open-meeting-link = Join Meeting
 loading-events = Loading events...
+show-next-meeting = Show next meeting in panel
+next-meeting = in { $countdown } { $name }
+next-meeting-now = now { $name }
+next-meeting-tomorrow = tomorrow { $time } { $name }

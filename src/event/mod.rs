@@ -112,6 +112,48 @@ pub fn filter_events_for_date(events: &[CalendarEvent], date: Date) -> Vec<Calen
     filtered
 }
 
+/// Returns the meeting to show in the panel: a timed (non all-day) event that is in
+/// progress right now, or otherwise the earliest one that starts later today or tomorrow.
+/// If several meetings overlap, the most recently started one wins.
+pub fn current_or_next_event<'a>(
+    events: &'a [CalendarEvent],
+    now: &Zoned,
+) -> Option<&'a CalendarEvent> {
+    let timed = || events.iter().filter(|ev| !ev.is_all_day);
+
+    if let Some(current) = timed()
+        .filter(|ev| ev.start <= *now && *now < ev.end)
+        .max_by(|a, b| a.start.cmp(&b.start))
+    {
+        return Some(current);
+    }
+
+    let tomorrow = now.date().tomorrow().ok()?;
+    timed()
+        .filter(|ev| ev.start > *now)
+        .filter(|ev| ev.start.with_time_zone(now.time_zone().clone()).date() <= tomorrow)
+        .min_by(|a, b| a.start.cmp(&b.start))
+}
+
+/// Number of whole minutes until `start`, rounded up so that a meeting 30 seconds
+/// away still reads as one minute rather than zero.
+pub fn minutes_until(now: &Zoned, start: &Zoned) -> i64 {
+    let secs = start.timestamp().as_second() - now.timestamp().as_second();
+    if secs <= 0 { 0 } else { (secs + 59) / 60 }
+}
+
+/// Formats a countdown in minutes as a compact string such as `5m` or `1h 05m`.
+/// Returns `None` when the meeting has started.
+pub fn format_countdown(minutes: i64) -> Option<String> {
+    if minutes < 1 {
+        None
+    } else if minutes < 60 {
+        Some(format!("{minutes}m"))
+    } else {
+        Some(format!("{}h {:02}m", minutes / 60, minutes % 60))
+    }
+}
+
 /// Generates mock events for the given year and month for prototype and verification.
 pub fn mock_events_for_month(year: i16, month: i8) -> Vec<CalendarEvent> {
     use jiff::civil::{date, time};
@@ -210,6 +252,99 @@ mod tests {
 
         let dates = covered_dates(&event);
         assert_eq!(dates, vec![date(2026, 3, 5)]);
+    }
+
+    fn timed_event(id: &str, start: Zoned, minutes: i64) -> CalendarEvent {
+        CalendarEvent {
+            id: id.to_string(),
+            summary: id.to_string(),
+            end: start.checked_add(minutes.minutes()).unwrap(),
+            start,
+            is_all_day: false,
+            location: None,
+            url: None,
+        }
+    }
+
+    fn at(d: Date, h: i8, m: i8) -> Zoned {
+        d.at(h, m, 0, 0).to_zoned(jiff::tz::TimeZone::UTC).unwrap()
+    }
+
+    #[test]
+    fn test_current_or_next_event() {
+        let today = date(2026, 10, 6);
+        let all_day = CalendarEvent {
+            id: "all-day".to_string(),
+            summary: "all-day".to_string(),
+            start: today.to_zoned(jiff::tz::TimeZone::UTC).unwrap(),
+            end: date(2026, 10, 7).to_zoned(jiff::tz::TimeZone::UTC).unwrap(),
+            is_all_day: true,
+            location: None,
+            url: None,
+        };
+        let events = vec![
+            all_day,
+            timed_event("past", at(today, 8, 0), 30),
+            timed_event("in-progress", at(today, 9, 45), 30),
+            timed_event("later", at(today, 15, 0), 30),
+            timed_event("soon", at(today, 10, 30), 30),
+            timed_event("tomorrow", at(date(2026, 10, 7), 9, 0), 30),
+        ];
+
+        // A meeting in progress is shown, even with another one coming up.
+        let current = current_or_next_event(&events, &at(today, 10, 0)).unwrap();
+        assert_eq!(current.id, "in-progress");
+
+        // Once it ends, the next upcoming meeting is shown.
+        let next = current_or_next_event(&events, &at(today, 10, 15)).unwrap();
+        assert_eq!(next.id, "soon");
+
+        // Still shown at its exact start time and until it ends.
+        let started = current_or_next_event(&events, &at(today, 10, 30)).unwrap();
+        assert_eq!(started.id, "soon");
+        let ending = current_or_next_event(&events, &at(today, 10, 59)).unwrap();
+        assert_eq!(ending.id, "soon");
+
+        // Nothing left today, so tomorrow's first meeting is shown.
+        let tomorrow = current_or_next_event(&events, &at(today, 16, 0)).unwrap();
+        assert_eq!(tomorrow.id, "tomorrow");
+
+        // Meetings further out than tomorrow are not shown.
+        let day_after_only = vec![timed_event("day-after", at(date(2026, 10, 8), 8, 0), 30)];
+        assert!(current_or_next_event(&day_after_only, &at(today, 16, 0)).is_none());
+    }
+
+    #[test]
+    fn test_overlapping_meetings_prefer_most_recent_start() {
+        let today = date(2026, 10, 6);
+        let events = vec![
+            timed_event("long", at(today, 9, 0), 180),
+            timed_event("short", at(today, 10, 0), 30),
+        ];
+        let current = current_or_next_event(&events, &at(today, 10, 10)).unwrap();
+        assert_eq!(current.id, "short");
+    }
+
+    #[test]
+    fn test_minutes_until_rounds_up() {
+        let today = date(2026, 10, 6);
+        let start = at(today, 10, 30);
+        assert_eq!(minutes_until(&at(today, 10, 0), &start), 30);
+        let almost = today
+            .at(10, 29, 30, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .unwrap();
+        assert_eq!(minutes_until(&almost, &start), 1);
+        assert_eq!(minutes_until(&at(today, 10, 31), &start), 0);
+    }
+
+    #[test]
+    fn test_format_countdown() {
+        assert_eq!(format_countdown(0), None);
+        assert_eq!(format_countdown(1).as_deref(), Some("1m"));
+        assert_eq!(format_countdown(59).as_deref(), Some("59m"));
+        assert_eq!(format_countdown(60).as_deref(), Some("1h 00m"));
+        assert_eq!(format_countdown(125).as_deref(), Some("2h 05m"));
     }
 
     #[test]

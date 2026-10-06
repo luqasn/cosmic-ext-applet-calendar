@@ -117,6 +117,20 @@ The applet also scans `~/.local/share/cosmic-calendar/` and `/usr/share/calendar
 
 ---
 
+## Next Meeting in the Panel (Clock Replacement)
+
+In clock replacement mode, the applet can show the next meeting after the time, e.g. `Oct 6 10:35 AM · in 25m Standup`. While a meeting is in progress it reads `now Standup` until the meeting ends. When there are no more meetings today, it shows tomorrow's first meeting, e.g. `tomorrow 9:00 AM Standup`. All-day events and meetings after tomorrow are not shown.
+
+This is opt-in. Enable it with the **Show next meeting in panel** toggle at the bottom of the calendar popover, or from a shell:
+
+```bash
+echo true > ~/.config/cosmic/com.system76.CosmicAppletTime/v1/show_next_meeting
+```
+
+When enabled, the applet refreshes today's and tomorrow's events every 5 minutes, even while the popover is closed. It is only shown on horizontal (top/bottom) panels.
+
+---
+
 ## Uninstallation
 
 To completely remove the applet and restore the default system clock:
