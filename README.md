@@ -127,6 +127,12 @@ This is opt-in. Enable it with the **Show next meeting in panel** toggle at the 
 echo true > ~/.config/cosmic/com.system76.CosmicAppletTime/v1/show_next_meeting
 ```
 
+Turning it on also shows a **Bold countdown in the last 15 minutes** toggle (off by default). It makes the `in 12m` part bold once the meeting is 15 minutes or less away. To turn it on from a shell:
+
+```bash
+echo true > ~/.config/cosmic/com.system76.CosmicAppletTime/v1/bold_imminent_meeting
+```
+
 When enabled, the applet refreshes today's and tomorrow's events every 5 minutes, even while the popover is closed. It is only shown on horizontal (top/bottom) panels.
 
 ---

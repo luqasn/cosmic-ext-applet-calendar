@@ -12,6 +12,7 @@ pub struct TimeAppletConfig {
     pub show_date_in_top_panel: bool,
     pub show_weekday: bool,
     pub show_next_meeting: bool,
+    pub bold_imminent_meeting: bool,
     #[serde(default, skip_serializing_if = "str::is_empty")]
     pub format_strftime: String,
 }
@@ -25,6 +26,7 @@ impl Default for TimeAppletConfig {
             show_date_in_top_panel: true,
             show_weekday: false,
             show_next_meeting: false,
+            bold_imminent_meeting: false,
             format_strftime: Default::default(),
         }
     }

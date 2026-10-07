@@ -53,6 +53,19 @@ const TODAY_EVENTS_REFRESH: std::time::Duration = std::time::Duration::from_secs
 /// Maximum number of characters of a meeting name shown in the panel.
 const NEXT_MEETING_MAX_CHARS: usize = 32;
 
+/// With `bold_imminent_meeting`, the countdown turns bold at this many minutes or fewer.
+const IMMINENT_MEETING_MINUTES: i64 = 15;
+
+/// The parts of the next meeting text in the panel, kept apart so the countdown
+/// can be styled separately from the name.
+struct NextMeetingLabel {
+    /// `in 25m`, `now`, or `tomorrow 9:00 AM`.
+    when: String,
+    /// Whether `when` should be bold.
+    emphasize: bool,
+    name: String,
+}
+
 static AUTOSIZE_MAIN_ID: LazyLock<Id> = LazyLock::new(|| Id::new("autosize-main"));
 
 // Specifiers for strftime that indicate seconds. Subsecond precision isn't supported by the applet
@@ -149,6 +162,7 @@ pub enum Message {
     FetchEvents(Date),
     EventsLoaded(Date, Result<Vec<crate::event::CalendarEvent>, String>),
     ToggleNextMeeting(bool),
+    ToggleBoldImminentMeeting(bool),
     UpcomingEventsLoaded(Date, Result<Vec<crate::event::CalendarEvent>, String>),
 }
 
@@ -350,14 +364,23 @@ impl<M: AppletModeTrait> Window<M> {
             }
         };
 
-        let formatted_date = match self.next_meeting_label() {
-            Some(label) => format!("{formatted_date} · {label}"),
-            None => formatted_date,
-        };
+        let mut label = row![self.core.applet.text(formatted_date)]
+            .spacing(theme::active().cosmic().spacing.space_xxs)
+            .align_y(Alignment::Center);
+        if let Some(meeting) = self.next_meeting_label() {
+            let mut when = self.core.applet.text(meeting.when);
+            if meeting.emphasize {
+                when = when.font(cosmic::font::bold());
+            }
+            label = label
+                .push(self.core.applet.text("·"))
+                .push(when)
+                .push(self.core.applet.text(meeting.name));
+        }
 
         Element::from(
             row!(
-                self.core.applet.text(formatted_date),
+                label,
                 container(space::vertical().height(Length::Fixed(
                     (self.core.applet.suggested_size(true).1
                         + 2 * self.core.applet.suggested_padding(true).1)
@@ -371,7 +394,7 @@ impl<M: AppletModeTrait> Window<M> {
     /// Panel label for the current or next meeting: `in 25m Standup` for later today,
     /// `now Standup` while it is in progress, or `tomorrow 9:00 AM Standup`.
     /// Only produced in clock mode with `show_next_meeting` enabled.
-    fn next_meeting_label(&self) -> Option<String> {
+    fn next_meeting_label(&self) -> Option<NextMeetingLabel> {
         if M::IS_STANDALONE || !self.config.show_next_meeting {
             return None;
         }
@@ -390,13 +413,25 @@ impl<M: AppletModeTrait> Window<M> {
         let start = event.start.with_time_zone(self.now.time_zone().clone());
         if start.date() != self.now.date() && start > self.now {
             let time = start.strftime(self.event_time_format()).to_string();
-            return Some(fl!("next-meeting-tomorrow", time = time, name = name));
+            return Some(NextMeetingLabel {
+                when: fl!("next-meeting-tomorrow", time = time),
+                emphasize: false,
+                name,
+            });
         }
 
         let minutes = crate::event::minutes_until(&self.now, &event.start);
         Some(match crate::event::format_countdown(minutes) {
-            Some(countdown) => fl!("next-meeting", countdown = countdown, name = name),
-            None => fl!("next-meeting-now", name = name),
+            Some(countdown) => NextMeetingLabel {
+                when: fl!("next-meeting", countdown = countdown),
+                emphasize: self.config.bold_imminent_meeting && minutes <= IMMINENT_MEETING_MINUTES,
+                name,
+            },
+            None => NextMeetingLabel {
+                when: fl!("next-meeting-now"),
+                emphasize: false,
+                name,
+            },
         })
     }
 
@@ -1029,6 +1064,17 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
                 }
                 Task::none()
             }
+            Message::ToggleBoldImminentMeeting(enabled) => {
+                match cosmic_config::Config::new(Self::APP_ID, TimeAppletConfig::VERSION) {
+                    Ok(config) => {
+                        if let Err(err) = self.config.set_bold_imminent_meeting(&config, enabled) {
+                            tracing::error!(?err, "Failed to save bold_imminent_meeting");
+                        }
+                    }
+                    Err(err) => tracing::error!(?err, "Failed to open applet config"),
+                }
+                Task::none()
+            }
             Message::UpcomingEventsLoaded(date, result) => {
                 if date == self.date_today {
                     match result {
@@ -1176,6 +1222,18 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
                 .align_y(Alignment::Center),
             )
         });
+        let bold_imminent_toggle =
+            (!M::IS_STANDALONE && self.config.show_next_meeting).then(|| {
+                padded_control(
+                    row![
+                        text::body(fl!("bold-imminent-meeting")),
+                        space::horizontal().width(Length::Fill),
+                        toggler(self.config.bold_imminent_meeting)
+                            .on_toggle(Message::ToggleBoldImminentMeeting),
+                    ]
+                    .align_y(Alignment::Center),
+                )
+            });
 
         let content_list = column![
             row![
@@ -1191,6 +1249,7 @@ impl<M: AppletModeTrait> cosmic::Application for Window<M> {
             padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
         ]
         .push_maybe(next_meeting_toggle)
+        .push_maybe(bold_imminent_toggle)
         .push(
             menu_button(text::body(fl!("datetime-settings")))
                 .on_press(Message::OpenDateTimeSettings),
