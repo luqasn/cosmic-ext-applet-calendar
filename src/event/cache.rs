@@ -143,6 +143,7 @@ mod tests {
             is_all_day: true,
             location: None,
             url: None,
+            meeting_url: None,
         }
     }
 

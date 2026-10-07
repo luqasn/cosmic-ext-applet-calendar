@@ -6,6 +6,7 @@ pub mod cache;
 pub mod eds;
 pub mod error;
 pub mod ical;
+pub mod meeting;
 
 pub use backend::{CalendarBackend, CompositeBackend, LocalIcsBackend, MockBackend};
 pub use cache::EventCache;
@@ -24,6 +25,8 @@ pub struct CalendarEvent {
     pub is_all_day: bool,
     pub location: Option<String>,
     pub url: Option<String>,
+    /// Joinable online meeting link, restricted to [`meeting::MEETING_PROVIDERS`].
+    pub meeting_url: Option<String>,
 }
 
 /// Validates that a URL is strictly an HTTP or HTTPS web link.
@@ -174,7 +177,8 @@ pub fn mock_events_for_month(year: i16, month: i8) -> Vec<CalendarEvent> {
             end,
             is_all_day: false,
             location: Some("Online".to_string()),
-            url: Some("https://meet.google.com/abc-defg-hij".to_string()),
+            url: None,
+            meeting_url: Some("https://meet.google.com/abc-defg-hij".to_string()),
         });
     }
 
@@ -191,6 +195,7 @@ pub fn mock_events_for_month(year: i16, month: i8) -> Vec<CalendarEvent> {
             is_all_day: true,
             location: None,
             url: None,
+            meeting_url: None,
         });
     }
 
@@ -209,6 +214,7 @@ pub fn mock_events_for_month(year: i16, month: i8) -> Vec<CalendarEvent> {
             is_all_day: false,
             location: Some("Meeting Room B".to_string()),
             url: Some("https://zoom.us/j/123456789".to_string()),
+            meeting_url: None,
         });
     }
 
@@ -248,6 +254,7 @@ mod tests {
             is_all_day: true,
             location: None,
             url: None,
+            meeting_url: None,
         };
 
         let dates = covered_dates(&event);
@@ -263,6 +270,7 @@ mod tests {
             is_all_day: false,
             location: None,
             url: None,
+            meeting_url: None,
         }
     }
 
@@ -281,6 +289,7 @@ mod tests {
             is_all_day: true,
             location: None,
             url: None,
+            meeting_url: None,
         };
         let events = vec![
             all_day,
@@ -374,6 +383,7 @@ mod tests {
             is_all_day: false,
             location: None,
             url: None,
+            meeting_url: None,
         };
 
         let dates = covered_dates(&event);

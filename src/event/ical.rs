@@ -1,7 +1,7 @@
 // Copyright 2023 System76 <info@system76.com>
 // SPDX-License-Identifier: GPL-3.0-only
 
-use crate::event::{CalendarError, CalendarEvent, is_safe_web_url};
+use crate::event::{CalendarError, CalendarEvent, is_safe_web_url, meeting::find_meeting_url};
 use jiff::{
     ToSpan, Zoned,
     civil::{Date, time},
@@ -160,16 +160,16 @@ pub fn parse_ical_datetime(val: &str, is_all_day: bool) -> Result<Zoned, Calenda
     )))
 }
 
-/// Searches a text string for Google Meet, Zoom, or Microsoft Teams meeting URLs.
-pub fn extract_meeting_url(text: &str) -> Option<String> {
-    for word in text.split_whitespace() {
-        let clean = word.trim_matches(['(', ')', '[', ']', '<', '>', ',', ';', '"', '\'', '.']);
-        if (clean.starts_with("https://meet.google.com/")
-            || clean.starts_with("https://") && clean.contains("zoom.us/j/")
-            || clean.starts_with("https://teams.microsoft.com/"))
-            && is_safe_web_url(clean)
-        {
-            return Some(clean.to_string());
+/// Splits a content line into its name-with-parameters and its value at the first
+/// colon outside double quotes, since parameter values such as `ALTREP="https://…"`
+/// may contain colons.
+fn split_content_line(line: &str) -> Option<(&str, &str)> {
+    let mut in_quotes = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => in_quotes = !in_quotes,
+            ':' if !in_quotes => return Some((&line[..i], &line[i + 1..])),
+            _ => {}
         }
     }
     None
@@ -182,6 +182,8 @@ struct RawVEvent {
     description: String,
     location: Option<String>,
     url: Option<String>,
+    /// Google's conference link (`X-GOOGLE-CONFERENCE`).
+    conference: Option<String>,
     start_raw: Option<(String, bool)>,
     end_raw: Option<(String, bool)>,
     duration_raw: Option<String>,
@@ -402,6 +404,7 @@ pub fn expand_rrule(
                         is_all_day: base.is_all_day,
                         location: base.location.clone(),
                         url: base.url.clone(),
+                        meeting_url: base.meeting_url.clone(),
                     });
                 }
 
@@ -479,6 +482,7 @@ pub fn expand_rrule(
                             is_all_day: base.is_all_day,
                             location: base.location.clone(),
                             url: base.url.clone(),
+                            meeting_url: base.meeting_url.clone(),
                         });
                     }
 
@@ -529,6 +533,7 @@ pub fn expand_rrule(
                         is_all_day: base.is_all_day,
                         location: base.location.clone(),
                         url: base.url.clone(),
+                        meeting_url: base.meeting_url.clone(),
                     });
                 }
 
@@ -578,6 +583,7 @@ pub fn expand_rrule(
                         is_all_day: base.is_all_day,
                         location: base.location.clone(),
                         url: base.url.clone(),
+                        meeting_url: base.meeting_url.clone(),
                     });
                 }
 
@@ -648,7 +654,17 @@ pub fn parse_ical_content(
                             .unwrap_or_else(|_| start.clone())
                     };
 
-                    let final_url = raw.url.or_else(|| extract_meeting_url(&raw.description));
+                    // Prefer the dedicated properties over links found in free text.
+                    let final_meeting_url = [
+                        raw.url.as_deref(),
+                        raw.conference.as_deref(),
+                        raw.location.as_deref(),
+                        Some(raw.description.as_str()),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .find_map(find_meeting_url);
+                    let final_url = raw.url;
 
                     let final_summary = if raw.summary.is_empty() {
                         "(Untitled event)".to_string()
@@ -670,6 +686,7 @@ pub fn parse_ical_content(
                         is_all_day,
                         location: raw.location,
                         url: final_url,
+                        meeting_url: final_meeting_url,
                     };
 
                     if let Some(rrule_str) = raw.rrule_raw
@@ -693,26 +710,30 @@ pub fn parse_ical_content(
         }
 
         if let Some(raw) = current_event.as_mut() {
-            let (key_part, val_part) = match line.split_once(':') {
+            let (key_part, val_part) = match split_content_line(&line) {
                 Some((k, v)) => (k, v),
                 None => continue,
             };
 
             let key_upper = key_part.to_uppercase();
+            // Property name without parameters, e.g. `DESCRIPTION` for `DESCRIPTION;LANGUAGE=en`.
+            let name = key_upper.split(';').next().unwrap_or_default();
 
-            if key_upper == "UID" {
+            if name == "UID" {
                 raw.id = val_part.to_string();
-            } else if key_upper == "SUMMARY" {
+            } else if name == "SUMMARY" {
                 raw.summary = unescape_text(val_part);
-            } else if key_upper == "DESCRIPTION" {
+            } else if name == "DESCRIPTION" {
                 raw.description = unescape_text(val_part);
-            } else if key_upper == "LOCATION" {
+            } else if name == "LOCATION" {
                 raw.location = Some(unescape_text(val_part));
-            } else if key_upper == "URL" {
+            } else if name == "URL" {
                 if is_safe_web_url(val_part) {
                     raw.url = Some(val_part.to_string());
                 }
-            } else if key_upper == "STATUS" {
+            } else if name == "X-GOOGLE-CONFERENCE" {
+                raw.conference = Some(val_part.trim().to_string());
+            } else if name == "STATUS" {
                 if val_part.eq_ignore_ascii_case("CANCELLED") {
                     raw.is_cancelled = true;
                 }
@@ -772,8 +793,9 @@ END:VCALENDAR";
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, "event-123");
         assert_eq!(events[0].summary, "Team Planning");
+        assert_eq!(events[0].url, None);
         assert_eq!(
-            events[0].url,
+            events[0].meeting_url,
             Some("https://meet.google.com/xyz-123".to_string())
         );
         assert!(!events[0].is_all_day);
@@ -836,18 +858,45 @@ END:VCALENDAR";
     }
 
     #[test]
-    fn test_meeting_urls_zoom_and_teams() {
-        let zoom_text = "Join meeting: https://zoom.us/j/987654321?pwd=abc at 10:00";
-        assert_eq!(
-            extract_meeting_url(zoom_text),
-            Some("https://zoom.us/j/987654321?pwd=abc".to_string())
-        );
+    fn test_google_conference_property_and_parameters() {
+        let ics = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:google-1\r\n\
+SUMMARY;LANGUAGE=en:Standup\r\n\
+DTSTART:20260323T100000Z\r\n\
+DTEND:20260323T103000Z\r\n\
+LOCATION;ALTREP=\"https://example.com/room\":Room 1\r\n\
+X-GOOGLE-CONFERENCE:https://meet.google.com/abc-defg-hij\r\n\
+URL;VALUE=URI:https://example.com/agenda\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR";
 
-        let teams_text = "Microsoft Teams: https://teams.microsoft.com/l/meetup-join/123";
+        let events = parse_ical_content(ics, date(2026, 3, 1), date(2026, 3, 31)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Standup");
+        assert_eq!(events[0].location.as_deref(), Some("Room 1"));
+        assert_eq!(events[0].url.as_deref(), Some("https://example.com/agenda"));
         assert_eq!(
-            extract_meeting_url(teams_text),
-            Some("https://teams.microsoft.com/l/meetup-join/123".to_string())
+            events[0].meeting_url.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
         );
+    }
+
+    #[test]
+    fn test_non_whitelisted_meeting_links_are_not_joinable() {
+        let ics = "BEGIN:VCALENDAR\r\n\
+BEGIN:VEVENT\r\n\
+UID:zoom-1\r\n\
+SUMMARY:Zoom call\r\n\
+DTSTART:20260323T100000Z\r\n\
+DTEND:20260323T103000Z\r\n\
+DESCRIPTION:Join meeting: https://zoom.us/j/987654321?pwd=abc\r\n\
+END:VEVENT\r\n\
+END:VCALENDAR";
+
+        let events = parse_ical_content(ics, date(2026, 3, 1), date(2026, 3, 31)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].meeting_url, None);
     }
 
     #[test]
@@ -862,15 +911,6 @@ END:VCALENDAR";
         let bad_ics = "BEGIN:VCALENDAR\nGARBAGE LINE WITHOUT COLON\nDTSTART:INVALID\nEND:VCALENDAR";
         let res = parse_ical_content(bad_ics, date(2026, 1, 1), date(2026, 1, 31)).unwrap();
         assert_eq!(res.len(), 0);
-    }
-
-    #[test]
-    fn test_meeting_url_trailing_period_stripped() {
-        let text = "Please join the call at https://meet.google.com/abc-defg-hij. See you there!";
-        assert_eq!(
-            extract_meeting_url(text),
-            Some("https://meet.google.com/abc-defg-hij".to_string())
-        );
     }
 
     #[test]

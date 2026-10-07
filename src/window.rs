@@ -523,18 +523,24 @@ impl<M: AppletModeTrait> Window<M> {
                 .spacing(space_xs)
                 .align_y(Alignment::Center);
 
-            if let Some(url) = &event.url
+            if let Some(meeting_url) = &event.meeting_url
+                && crate::event::meeting::meeting_provider(meeting_url).is_some()
+            {
+                event_row = event_row.push(
+                    button::suggested(fl!("open-meeting-link"))
+                        .on_press(Message::OpenUrl(meeting_url.clone())),
+                );
+            } else if let Some(url) = &event.url
                 && crate::event::is_safe_web_url(url)
             {
-                let url_clone = url.clone();
                 let link_btn = button::icon(icon::from_name("link-symbolic"))
-                    .on_press(Message::OpenUrl(url_clone))
+                    .on_press(Message::OpenUrl(url.clone()))
                     .padding(4)
                     .class(cosmic::theme::Button::Text);
 
                 event_row = event_row.push(cosmic::widget::tooltip(
                     link_btn,
-                    text::caption(fl!("open-meeting-link")),
+                    text::caption(fl!("open-link")),
                     cosmic::widget::tooltip::Position::Top,
                 ));
             }

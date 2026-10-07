@@ -3,6 +3,7 @@ no-events-scheduled = No scheduled events
 all-day = All day
 untitled-event = (Untitled event)
 open-meeting-link = Join Meeting
+open-link = Open link
 loading-events = Loading events...
 show-next-meeting = Show next meeting in panel
 bold-imminent-meeting = Bold countdown in the last 15 minutes

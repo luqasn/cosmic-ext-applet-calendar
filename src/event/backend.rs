@@ -196,6 +196,9 @@ impl CalendarBackend for CompositeBackend {
                         if existing.url.is_none() && event.url.is_some() {
                             existing.url = event.url.clone();
                         }
+                        if existing.meeting_url.is_none() && event.meeting_url.is_some() {
+                            existing.meeting_url = event.meeting_url.clone();
+                        }
                         if existing.location.is_none() && event.location.is_some() {
                             existing.location = event.location.clone();
                         }
@@ -348,6 +351,7 @@ END:VCALENDAR";
             is_all_day: false,
             location: None,
             url: Some("https://meet.google.com/abc".to_string()),
+            meeting_url: None,
         };
 
         let ev2 = CalendarEvent {
@@ -358,6 +362,7 @@ END:VCALENDAR";
             is_all_day: false,
             location: Some("Clinic".to_string()),
             url: None,
+            meeting_url: None,
         };
 
         let ev1_duplicate = CalendarEvent {
@@ -368,6 +373,7 @@ END:VCALENDAR";
             is_all_day: false,
             location: Some("Online Room 1".to_string()),
             url: None,
+            meeting_url: None,
         };
 
         struct CustomBackend(Vec<CalendarEvent>);

@@ -28,7 +28,7 @@ Built as an independent applet using `libcosmic`, decoupled from the core `cosmi
 - **Local `.ics` File Support:** Auto-discovers calendar and public holiday `.ics` files in `~/.local/share/calendars/`, `~/.local/share/cosmic-calendar/`, and `/usr/share/calendar/`.
 - **Calendar Event Dots:** Monthly grid shows indicator dots beneath days with scheduled events.
 - **Chronological Agenda:** Selecting a day lists its events sorted by time (all-day events at top) with title, time, and location.
-- **One-Click Meeting Join:** Detects Google Meet, Zoom, and Microsoft Teams URLs and launches them in your default browser.
+- **One-Click Meeting Join:** Shows a **Join Meeting** button for Google Meet links (from Google's conference field, the location, or the description) and opens them in your default browser. Other services can be added to the whitelist in `src/event/meeting.rs`.
 - **Battery & Performance Optimization:** Zero background polling or CPU wakeups when the popup is closed. In-memory LRU cache with a 60-second TTL provides instant 0ms month navigation.
 - **Fault-Tolerant Deduplication:** Deduplicates events appearing across multiple calendars or identical recurring instances without dropping distinct meetings at the same hour.
 - **40+ Language Translations:** Built-in localization support via Fluent.
